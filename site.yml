@@ -1,0 +1,70 @@
+---
+- hosts: mypc
+  gather_facts: false
+  vars:
+    ubuntu_default_user: myname
+    awx_listen_port: 8080
+  tasks:
+    - name: Update WSL
+      yumizu11.wsl.wsl:
+        state: updated
+      become: true
+
+    - name: Install Ubuntu-24.04
+      yumizu11.wsl.distribution:
+        name: Ubuntu-24.04
+        is_default: true
+        default_user: "{{ ubuntu_default_user }}"
+        run_cmd:
+          - add-apt-repository ppa:ansible/ansible -y
+          - apt update
+          - apt upgrade -y
+          - apt install ansible -y
+        state: installed
+      register: install_result
+
+    - name: Create temp directory
+      ansible.windows.win_file:
+        path: C:\temp
+        state: directory
+
+    - name: Copy awx install playbook
+      ansible.windows.win_copy:
+        src: awx.yml
+        dest: C:\temp\awx.yml
+
+    - name: Copy template files
+      ansible.windows.win_copy:
+        src: templates
+        dest: C:\temp\
+
+    - name: Install AWX on Ubuntu-24.04
+      ansible.windows.win_command:
+        'wsl -d Ubuntu-24.04 -- ansible-playbook /mnt/c/temp/awx.yml'
+
+    - name: Get AWX Info
+      ansible.windows.win_command:
+        "wsl -d Ubuntu-24.04 -- cat ~/awxinfo.yml"
+      register: cat_result
+
+    - name: Set awx_info param
+      ansible.builtin.set_fact:
+        awx_info: "{{ cat_result.stdout | from_yaml | combine({'external_url': 'http://' + ansible_host + ':' + (awx_listen_port | string) }) }}"
+
+    - name: Set up port forwarding
+      ansible.windows.win_command:
+        "netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport={{ awx_listen_port }} connectaddress={{ awx_info.ip_address }} connectport={{ awx_info.port }}"
+
+    - name: Add firewall rule to allow access to AWX Web UI
+      community.windows.win_firewall_rule:
+        name: AWX Web UI
+        localport: "{{ awx_listen_port }}"
+        action: allow
+        direction: in
+        protocol: tcp
+        state: present
+        enabled: yes
+
+    - name: Show awx_info
+      ansible.builtin.debug:
+        var: awx_info

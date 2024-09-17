@@ -1,0 +1,79 @@
+---
+- name: Install AWX on k3s
+  hosts: localhost
+  vars:
+    awx_version: 2.19.1
+    awx_namespace: awx
+    awx_metadata_name: awxk3s
+    awx_http_port: 8080
+  tasks:
+    - name: Install python3-kubernetes
+      ansible.builtin.apt:
+        name: python3-kubernetes
+      become: true
+
+    - name: Create a work directory
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: awx
+      register: workdir
+
+    - name: Download K3s install script
+      ansible.builtin.uri:
+        url: https://get.k3s.io
+        dest: "{{ workdir.path }}/k3s.sh"
+        mode: 0766
+
+    - name: Install k3s
+      ansible.builtin.shell:
+        "{{ workdir.path }}/k3s.sh --write-kubeconfig-mode 644"
+      become: true
+
+    - name: Copy kustomization template file
+      ansible.builtin.template:
+        src: templates/kustomization.j2
+        dest: "{{ workdir.path }}/kustomization.yaml"
+        mode: 0666
+
+    - name: Apply manifest with kustomization
+      kubernetes.core.k8s:
+        definition: "{{ lookup('kubernetes.core.kustomize', binary_path='/usr/local/bin/kubectl', dir=workdir.path) }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        wait: true
+
+    - name: Copy AWX custom resource template file
+      ansible.builtin.template:
+        src: templates/awx.j2
+        dest: "{{ workdir.path }}/awx.yaml"
+        mode: 0666
+
+    - name: Apply AWX custom resource
+      kubernetes.core.k8s:
+        definition: "{{ lookup('file', workdir.path + '/awx.yaml') | from_yaml }}"
+        namespace: "{{ awx_namespace }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        wait: true
+
+    - name: Get admin password
+      kubernetes.core.k8s_info:
+        kind: Secret
+        name: "{{ awx_metadata_name }}-admin-password"
+        namespace: "{{ awx_namespace }}"
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        wait: true
+      register: secret_object
+
+    - name: Create AWX Info param
+      ansible.builtin.set_fact:
+        awx_info:
+          ip_address: "{{ ansible_eth0.ipv4.address }}"
+          port: "{{ awx_http_port }}"
+          url: "http://{{ ansible_eth0.ipv4.address }}:{{ awx_http_port }}"
+          admin_user: admin
+          admin_password: "{{ secret_object.resources[0].data.password | b64decode }}"
+
+    - name: Write AWX Info to a file
+      ansible.builtin.copy:
+        content: "---\n{{ awx_info | to_nice_yaml }}"
+        dest: ~/awxinfo.yml
+        mode: 0444
